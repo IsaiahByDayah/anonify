@@ -1,19 +1,20 @@
 'use strict'; 
+require('dotenv').config();
+
 const express = require('express'); 
 const bodyParser = require('body-parser'); 
 const SlackClient = require('@slack/client');
 const aaa = require("adjective-adjective-animal");
 
-const FULL_KEY = 'xoxp-146917219830-146917220230-324479961909-deb3c420aa031aba0b0b4cf4c976ef93';
-const webClient = new SlackClient.WebClient(FULL_KEY);
+const webClient = new SlackClient.WebClient(process.env.OAUTH_ACCESS_TOKEN);
+console.log("OAUTH TOKEN: ", process.env.OAUTH_ACCESS_TOKEN);
+const bot = new SlackClient.WebClient(process.env.BOT_ACCESS_TOKEN);
+console.log("BOT TOKEN: ", process.env.BOT_ACCESS_TOKEN);
 
-const BOT_KEY = 'xoxb-324359672722-MFHEKfsraU4Dk9GsczJDhFsv';
-const botWebClient = new SlackClient.WebClient(BOT_KEY);
-
-const membersChannel = 'test2';
-const members = [
-	'jordankid93'
-];
+const membersChannel = process.env.ANNOUNCEMENT_CHANNEL;
+console.log("Members Channel: ", membersChannel);
+const members = process.env.MEMBERS.split(' ');
+console.log("Members: ", members);
 
 const app = express(); 
 app.use(bodyParser.json()); 
@@ -22,45 +23,19 @@ app.use(bodyParser.urlencoded({ extended: true }));
 let convos = [];
 let requests = [];
 
-app.post('/', (req, res) => { 
-	let text = req.body.text; 
-	console.log(req.body);
+app.post('/', (req, res) => {
 
 	if (req.body.command == '/anon-chat') {
 		res.json({
 			text: 'A new anonymous chat will begin with you shortly...'
 		});
 
-		let convo = {};
-		let newConvo = newConvoConfig({
-			id: req.body.user_id,
-			username: req.body.user_name
-		}, req.body.text)
-		.then(function(config){
-			console.log("Config: ", config);
-			convo = config;
-			return webClient.groups.create(convo.user.channel.name);
-		})
-		.then(function(group){
-			console.log("Group: ", group);
-			convo.user.channel.id = group.group.id;
-			console.log("User Channel: ", convo.user.channel.id);
-			return webClient.groups.invite(convo.user.channel.id, appData.selfId);
-		})
-		.then(function(invite){
-			console.log("Invite: ", invite);
-			return botWebClient.chat.postMessage(convo.user.channel.id, "Just hold tight, we've notified the committee you'd like to chat anonymously and will let you know when someone responds!");
-		})
-		.then(function(msg){
-			console.log("Message: ", msg);
-			return aaa();
-		})
-		.then(function(request){
-			convo.user.codename = request;
-			requests.push(convo);
-			console.log("Requests Object: ", requests);
-			notifyCommittee('Hey Committee! `'+request+'` would like to chat! Type `/new-chats` to find out more');
-		});
+		let user = {
+			id: req.body.user_id
+		};
+		let topic = req.body.text;
+
+		startAnonConvo(user, topic);
 	}
 	else if (req.body.command == '/new-chats') {
 		if (!members.includes(req.body.user_name)) {
@@ -72,17 +47,13 @@ app.post('/', (req, res) => {
 			let listOfRequests = '';
 			for (let openReq of requests) {
 				if (openReq.member.id == undefined) {
-					listOfRequests += '> '+openReq.user.codename;
-					if (openReq.message && openReq.message != '') {
-						listOfRequests += ' - ' + openReq.message;
-					}
-					listOfRequests += '\n\n';
+					listOfRequests += '> '+openReq.user.codename + ' - ' + openReq.topic + '\n\n';
 				}
 			}
 			console.log("Requests: ", listOfRequests);
 
 			return res.json({
-				text: listOfRequests + '\n\n type `/open-chat [convo-name]` to take one of these available convos.'
+				text: listOfRequests + '\n\n type `/open-chat {codename}` to take one of these available convos.'
 			});
 		}
 	}
@@ -125,8 +96,36 @@ app.post('/', (req, res) => {
 			})
 			.then(function(invite){
 				console.log("Invite: ", invite);
-				return botWebClient.chat.postMessage(foundReq.member.channel.id, "Hey, type here and we're relay your messages.");
+				return bot.chat.postMessage(foundReq.member.channel.id, "Hey, type here and we're relay your messages.");
 			});
+		}
+	}
+	else if (req.body.command == '/reveal-chat') {
+		console.log("Command: ", req.body);
+		for (let convo of convos) {
+			if (convo.user.channel.id == req.body.channel_id) {
+				convo.user.reveal = true;
+				bot.chat.postMessage(convo.member.channel.id, "*_"+convo.user.codename+" has revealed themselves as "+convo.user.username+"_*");
+				return res.json({
+					text: "*_You have revealed your username to "+convo.member.username+"_*"
+				});
+			}
+		}
+		res.json({
+			text: "Hmmm, looks like you're not in an anonymous channel. Try switching to an anonymous channels and running `/reveal-chat` again to reveal your username"
+		});
+	}
+	else if (req.body.command == '/close-chat') {
+		res.json({
+			text: "Closing anonymous chat..."
+		});
+		for (let convoIndex in convos) {
+			let convo = convos[convoIndex];
+			if (convo.user.channel.id == req.body.channel_id || convo.member.channel.id == req.body.channel_id) {
+				convos.splice(convoIndex, 1);
+				bot.chat.postMessage(convo.member.channel.id, "*_Anonymous chat closed._*");
+				bot.chat.postMessage(convo.user.channel.id, "*_Anonymous chat closed._*");
+			}
 		}
 	}
 	else {
@@ -147,7 +146,7 @@ const appData = {};
 
 // Initialize the RTM client with the recommended settings. Using the defaults for these
 // settings is deprecated.
-const rtm = new SlackClient.RtmClient(BOT_KEY, {
+const rtm = new SlackClient.RtmClient(process.env.BOT_ACCESS_TOKEN, {
   dataStore: false,
   useRtmConnect: true,
 });
@@ -160,9 +159,6 @@ rtm.on(SlackClient.CLIENT_EVENTS.RTM.AUTHENTICATED, (connectData) => {
   console.log(`Logged in as ${appData.selfId} of team ${connectData.team.id}`);
 });
 
-// Load the current channels list asynchrously
-let channelListPromise = botWebClient.channels.list();
-
 // The client will emit an RTM.RTM_CONNECTION_OPENED the connection is ready for
 // sending and receiving messages
 rtm.on(SlackClient.CLIENT_EVENTS.RTM.RTM_CONNECTION_OPENED, () => {
@@ -172,47 +168,91 @@ rtm.on(SlackClient.CLIENT_EVENTS.RTM.RTM_CONNECTION_OPENED, () => {
 rtm.on(SlackClient.RTM_EVENTS.MESSAGE, (message) => {
 	// For structure of `message`, see https://api.slack.com/events/message
 
-	// Skip messages that are from a bot or my own user ID
+	// Skip messages that are from a bot or my own user ID or some other thing we dont care about
 	if ( (message.subtype && message.subtype === 'bot_message') ||
-	   (!message.subtype && message.user === appData.selfId) ) {
+	   (!message.subtype && message.user === appData.selfId) ||
+	   (message.subtype && message.subtype === 'group_join') ||
+	   (message.subtype && message.subtype === 'group_archive') ||
+	   (message.subtype && message.subtype === 'channel_join') ) {
 	return;
 	}
 
-	// Log the message
-	console.log('New message: ', message);
-	// rtm.sendMessage('`'+message.text+'` right back at ya ;)', message.channel);
-	// botWebClient.chat.postMessage(message.channel, 'Hey hey!');
 	let fromChannel = message.channel;
 	let toChannel = '';
 	for (let convo of convos) {
 		if (convo.user.channel.id == fromChannel) {
 			toChannel = convo.member.channel.id;
+			message.text = '*'+(convo.user.reveal ? convo.user.username : convo.user.codename)+':* ' + message.text;
 			break;
 		}
 		else if (convo.member.channel.id == fromChannel) {
 			toChannel = convo.user.channel.id;
+			message.text = '*'+convo.member.username+':* ' + message.text;
 			break;
 		}
 	}
-	botWebClient.chat.postMessage(toChannel, message.text);
+
+	if (toChannel) {
+		bot.chat.postMessage(toChannel, message.text);
+	}
+	else if (message.text && message.text.toLowerCase().includes('help')) {
+		bot.chat.postMessage(fromChannel, 'Hey! It looks like you\'re asking for help. A new anonymous chat will begin with you shortly...');
+		startAnonConvo({id: message.user});
+	}
+	else {
+		bot.chat.postMessage(fromChannel, ':( Sorry, I don\'t quite understand what you\'re saying. You can type "help" if you\'d like to speak with someone anonymously');
+	}
 });
 
+console.log("Starting RTM...");
 // Start the connecting process
 rtm.start();
 
+function startAnonConvo(user, topic) {
+	let convo = {};
+
+	newConvoConfig(user, topic)
+	.then(function(config){
+		console.log("Config: ", config);
+		convo = config;
+		return webClient.groups.create(convo.user.channel.name);
+	})
+	.then(function(group){
+		console.log("Group: ", group);
+		convo.user.channel.id = group.group.id;
+		console.log("User Channel: ", convo.user.channel.id);
+		return webClient.groups.invite(convo.user.channel.id, appData.selfId);
+	})
+	.then(function(invite){
+		console.log("Invite: ", invite);
+		return bot.chat.postMessage(convo.user.channel.id, "Just hold tight, we've notified the committee you'd like to chat anonymously and will let you know when someone responds!");
+	})
+	.then(function(msg){
+		console.log("Message: ", msg);
+		return aaa(1);
+	})
+	.then(function(codename){
+		convo.user.codename = codename;
+		requests.push(convo);
+		console.log("Requests Object: ", requests);
+		notifyCommittee('Hey Committee! `'+codename+'` would like to chat! Type `/new-chats` to find out more');
+	});
+}
+
 function notifyCommittee(message) {
-	botWebClient.channels.list()
+	console.log("Fetching channels...");
+	bot.channels.list()
 	.then(function(channels){
 		console.log("Channels: ", channels);
 		for (let channel of channels.channels) {
 			if (channel.name == membersChannel) {
-				return botWebClient.chat.postMessage(channel.id, message);
+				return bot.chat.postMessage(channel.id, message);
 			}
 		}
 	});
 }
 
-function newConvoConfig(user, msg) {
+function newConvoConfig(user, topic) {
 	return new Promise(function(resolve, reject){
 		let time = new Date().getTime();
 		let userChannel = 'Anonify-' + time;
@@ -221,22 +261,22 @@ function newConvoConfig(user, msg) {
 		let member = getRandom(members);
 
 		let config = {};
-		config.message = msg || "No additional message provided";
-		config.user = {
-			id: user.id,
-			username: user.username,
+		config.topic = topic || "No topic";
+		config.member = {
 			channel: {
-				name: userChannel
+				name: memberChannel	
 			}
 		};
 
-		getUser({username: member})
-		.then(function(memberInfo){
-			config.member = {
-				// id: memberInfo.id,
-				// username: memberInfo.name,
+		getUser(user)
+		.then(function(userInfo){
+			console.log("User Info: ", userInfo);
+			config.user = {
+				id: userInfo.id,
+				username: userInfo.name,
+				reveal: false,
 				channel: {
-					name: memberChannel	
+					name: userChannel
 				}
 			};
 
@@ -248,11 +288,10 @@ function newConvoConfig(user, msg) {
 
 function getUser(q) {
 	return new Promise(function(resolve, reject){
-		botWebClient.users.list()
+		bot.users.list()
 		.then(function(users){
-			// return console.log("Users: ", users.members);
 			for (let user of users.members) {
-				// console.log("User: ", user);
+				// TODO: dynamically match properties of q to properties of user
 				if (q.username != undefined) {
 					if (user.name == q.username) {
 						return resolve(user);
